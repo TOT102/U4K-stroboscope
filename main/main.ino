@@ -12,9 +12,11 @@ const float maxFrequency = 12; // max frequency in Hz
 float oscFrequency = 0; // initial frequebcy 
 unsigned long oscPeriod = 0;
 
-unsigned long lastToggleTime = 0; 
+unsigned long lastToggleTimeSolenoid = 0; 
+unsigned long lastToggleTimeLED = 0;
 bool solenoidState = false; 
 bool ledState = false;  
+const float phaseShift = 0.25; 
 
 void setup(){
   pinMode(M1A, OUTPUT);
@@ -29,11 +31,12 @@ void loop(){
   int potVal = analogRead(potPin);
   oscFrequency = map(potVal, 0, 1023, minFrequency * 10, maxFrequency * 10) / 10.0;
 
-  oscPeriod = 1000 / (oscFrequency*2) ;
+  oscPeriod = 1000 / (oscFrequency * 2);
  
   unsigned long currentTime = millis();
-  if (currentTime - lastToggleTime >= oscPeriod) {
-    lastToggleTime = currentTime; 
+
+  if (currentTime - lastToggleTimeSolenoid >= oscPeriod) {
+    lastToggleTimeSolenoid = currentTime; 
 
     solenoidState = !solenoidState;
     if (solenoidState) {
@@ -43,6 +46,10 @@ void loop(){
       digitalWrite(M1A, LOW);
       digitalWrite(M1B, HIGH);
     }
+  }
+
+  if (currentTime - lastToggleTimeLED >= (oscPeriod + oscPeriod * phaseShift)) {
+    lastToggleTimeLED = currentTime; 
 
     ledState = !ledState;
     if (ledState) {
