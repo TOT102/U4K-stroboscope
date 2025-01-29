@@ -1,7 +1,9 @@
 #define DEF_OFFSET 50
-#define EXPO 400 // how long the LED is enabled in microseconds
-#define PERIOD 5000 // priod of flickering in microseconds
+#define EXPO 400  // how long the LED is enabled in microseconds
+#define PERIOD 10000  // period of flickering in microseconds
 #define SET_TIMER 500
+#define ADC_PRESCALER 4  
+#define FIXED_OSC_PERIOD 300000  
 
 #define M1A 5
 #define M1B 6
@@ -11,12 +13,26 @@
 
 volatile bool solenoidState = false;
 volatile bool ledState = false;
-volatile uint16_t oscPeriod = PERIOD;
-volatile uint16_t lightTimer = EXPO;
 volatile uint16_t flashDelay = PERIOD * 2 + DEF_OFFSET;
 uint32_t lastPotRead = 0;
 
+void setADCprescaler(uint8_t prescaler) {
+  ADC0.CTRLA &= ~ADC_ENABLE_bm;  
+  ADC0.CTRLA = (ADC0.CTRLA & ~ADC_PRESC_gm) | prescaler;  
+  ADC0.CTRLA |= ADC_ENABLE_bm; 
+}
+
+uint16_t readADC(uint8_t channel) {
+  ADC0.MUXPOS = channel;      
+  ADC0.CTRLA |= ADC_STARTEI_bm;   
+  while (!(ADC0.INTFLAGS & ADC_RESRDY_bm)) {}  
+  ADC0.INTFLAGS = ADC_RESRDY_bm;  
+  return ADC0.RES;                
+}
+
 void setup() {
+  cli();
+
   pinMode(M1A, OUTPUT);
   pinMode(M1B, OUTPUT);
   pinMode(M2A, OUTPUT);
@@ -27,71 +43,62 @@ void setup() {
   digitalWrite(M2A, LOW);
   digitalWrite(M2B, LOW);
 
-//*********** TIMERS **********
-  TCCR1A = 0;
-  TCCR1B = (1 << WGM12) | (1 << CS11); // CTC rejim s 8 scaler, da se chisti kat se napulni
-  OCR1A = PERIOD;
-  TIMSK1 |= (1 << OCIE1A);
+  setADCprescaler(ADC_PRESCALER); 
 
-  TCCR3A = 0;
-  TCCR3B = (1 << WGM32) | (1 << CS31);
-  OCR3A = EXPO;
-  TIMSK3 |= (1 << OCIE3A);
-//*****************************
+  // Set up TCA0 (16-bit Timer) for solenoid control 
+  TCA0.SINGLE.CTRLA = TCA_SINGLE_CLKSEL_DIV64_gc | TCA_SINGLE_ENABLE_bm;  // Set prescaler to 64 and enable timer
+  TCA0.SINGLE.CTRLB = TCA_SINGLE_WGMODE_SINGLESLOPE_gc; // CTC mode (Single Slope PWM)
+  TCA0.SINGLE.PER = (FIXED_OSC_PERIOD / 64) - 1; // Set the period (adjusted for zero-indexed count)
+  TCA0.SINGLE.INTCTRL = TCA_SINGLE_OVF_bm;
 
-  setADCrate(2); // acceleration of analogRead ama neshto ne bachka
+  // Set up TCB0 (8-bit Timer) for LED control
+  TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
+  TCB0.CTRLB = TCB_CNTMODE_INT_gc;
+  TCB0.CCMP = EXPO / 64;
+  TCB0.INTCTRL = TCB_CAPT_bm;
+
+  Serial.begin(115200);
+  sei();
 }
 
 void loop() {
-  // timer of pot reading
   if (millis() - lastPotRead >= SET_TIMER) {
     lastPotRead = millis();
-    uint16_t potValue = readADC(POT_PIN);
+    uint16_t potValue = readADC(POT_PIN); 
+    Serial.println(potValue);
     float oscFrequency = map(potValue, 0, 1023, 10 * 10, 12 * 10) / 10.0;
     noInterrupts();
-    oscPeriod = 1000000 / (oscFrequency * 2);
-    flashDelay = oscPeriod * 2 + DEF_OFFSET;
-    OCR1A = oscPeriod;
-    OCR3A = EXPO;
+    flashDelay = 1000000 / (oscFrequency * 2);
+    TCB0.CCMP = EXPO / 64;  
     interrupts();
   }
 }
 
-ISR(TIMER1_COMPA_vect) {
-  solenoidState = !solenoidState;
+ISR(TCA0_OVF_vect) {
+//**** SOLENOID CONTROL ****
+  solenoidState = !solenoidState;  
   if (solenoidState) {
-    PORTC |= (1 << 6);
-    PORTD &= ~(1 << 7);
+    digitalWrite(M1A, HIGH);
+    digitalWrite(M1B, LOW);  
   } else {
-    PORTC &= ~(1 << 6);
-    PORTD |= (1 << 7);
+    digitalWrite(M1A, LOW);
+    digitalWrite(M1B, HIGH);  
   }
+  TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;  // Clear the interrupt flag
 }
 
-ISR(TIMER3_COMPA_vect) {
+ISR(TCB0_INT_vect) {
+//**** LED CONTROL ****
   static bool flashState = false;
-
   flashState = !flashState;
   if (flashState) {
-    // fast analogue of digitalWrite
-    PORTB |= (1 << 5);
-    PORTB &= ~(1 << 6);
-    OCR3A = EXPO;
+    digitalWrite(M2A, LOW);
+    digitalWrite(M2B, LOW);
+    TCB0.CCMP = EXPO / 64;
   } else {
-    // fast analogue of digitalWrite
-    PORTB &= ~(1 << 5);
-    PORTB |= (1 << 6);
-    OCR3A = flashDelay - EXPO;
+    digitalWrite(M2A, LOW);
+    digitalWrite(M2B, HIGH);
+    TCB0.CCMP = (flashDelay - EXPO) / 64;
   }
-}
-
-void setADCrate(byte mode) {
-  ADCSRA = (ADCSRA & ~0x07) | (mode & 0x07);
-}
-
-uint16_t readADC(uint8_t pin) { // neshto ne bachka trqbwa da se testwa
-  ADMUX = (ADMUX & 0xF0) | (pin & 0x0F);
-  ADCSRA |= (1 << ADSC);
-  while (ADCSRA & (1 << ADSC));
-  return ADC;
+  TCB0.INTFLAGS = TCB_CAPT_bm;  // Clear the interrupt flag
 }
